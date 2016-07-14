@@ -1,0 +1,6 @@
+#!ipxe
+echo INFO: successfully tftp fetched FB ipxe rom.
+echo INFO: setting dhcp user-class to 'FBipxe'.
+echo EXECUTING: set user-class FBipxe
+set user-class FBipxe
+isset ${filename} && echo Clearing old DHCP filename ${filename}

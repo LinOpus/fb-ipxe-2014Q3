@@ -1,0 +1,294 @@
+commit 4088a48d13eab1da94525b9824bf4503329c1133
+Author: Olivier Raginel <babar@fb.com>
+Date:   Thu Aug 7 08:14:38 2014 -0700
+
+    Facebook modifications
+
+diff --git a/src/config/general.h b/src/config/general.h
+index 72cfc3b..4238ef2 100644
+--- a/src/config/general.h
++++ b/src/config/general.h
+@@ -51,7 +51,7 @@ FILE_LICENCE ( GPL2_OR_LATER );
+  */
+ 
+ #define	NET_PROTO_IPV4		/* IPv4 protocol */
+-#undef	NET_PROTO_IPV6		/* IPv6 protocol */
++#define	NET_PROTO_IPV6		/* IPv6 protocol */
+ #undef	NET_PROTO_FCOE		/* Fibre Channel over Ethernet protocol */
+ 
+ /*
+@@ -135,7 +135,7 @@ FILE_LICENCE ( GPL2_OR_LATER );
+ #define LOGIN_CMD		/* Login command */
+ #define SYNC_CMD		/* Sync command */
+ //#define NSLOOKUP_CMD		/* DNS resolving command */
+-//#define TIME_CMD		/* Time commands */
++#define TIME_CMD		/* Time commands */
+ //#define DIGEST_CMD		/* Image crypto digest commands */
+ //#define LOTEST_CMD		/* Loopback testing commands */
+ //#define VLAN_CMD		/* VLAN commands */
+diff --git a/src/image/efi_image.c b/src/image/efi_image.c
+index ce1d4b8..6163b79 100644
+--- a/src/image/efi_image.c
++++ b/src/image/efi_image.c
+@@ -124,6 +124,19 @@ static wchar_t * efi_image_cmdline ( struct image *image ) {
+ 	return cmdline;
+ }
+ 
++static int check_boot_snp() {
++	EFI_BOOT_SERVICES *bs = efi_systab->BootServices;
++	EFI_STATUS efirc;
++	void *snp;
++	EFI_GUID snpguid = EFI_SIMPLE_NETWORK_PROTOCOL_GUID;
++	efirc = bs->OpenProtocol ( efi_loaded_image->DeviceHandle,
++				&snpguid, &snp, efi_image_handle, NULL,
++				EFI_OPEN_PROTOCOL_GET_PROTOCOL);
++	if (efirc) {
++		return -1;
++	}
++	return 1;
++}
+ /**
+  * Execute EFI image
+  *
+@@ -139,13 +152,21 @@ static int efi_image_exec ( struct image *image ) {
+ 		void *interface;
+ 	} loaded;
+ 	EFI_HANDLE handle;
++	EFI_HANDLE nethandle;
++	EFI_DEVICE_PATH_PROTOCOL *netpath;
+ 	wchar_t *cmdline;
+ 	EFI_STATUS efirc;
+ 	int rc;
+ 
+ 	/* Find an appropriate device handle to use */
+ 	snpdev = last_opened_snpdev();
+-	if ( ! snpdev ) {
++	if ( snpdev ) {
++		nethandle = snpdev->handle;
++		netpath = snpdev->path;
++	} else if (check_boot_snp() > 0) {
++		nethandle = efi_loaded_image->DeviceHandle;
++		netpath = efi_loaded_image->FilePath;
++	} else {
+ 		DBGC ( image, "EFIIMAGE %p could not identify SNP device\n",
+ 		       image );
+ 		rc = -ENODEV;
+@@ -153,21 +174,21 @@ static int efi_image_exec ( struct image *image ) {
+ 	}
+ 
+ 	/* Install file I/O protocols */
+-	if ( ( rc = efi_file_install ( snpdev->handle ) ) != 0 ) {
++	if ( ( rc = efi_file_install ( nethandle ) ) != 0 ) {
+ 		DBGC ( image, "EFIIMAGE %p could not install file protocol: "
+ 		       "%s\n", image, strerror ( rc ) );
+ 		goto err_file_install;
+ 	}
+ 
+ 	/* Install iPXE download protocol */
+-	if ( ( rc = efi_download_install ( snpdev->handle ) ) != 0 ) {
++	if ( ( rc = efi_download_install ( nethandle ) ) != 0 ) {
+ 		DBGC ( image, "EFIIMAGE %p could not install iPXE download "
+ 		       "protocol: %s\n", image, strerror ( rc ) );
+ 		goto err_download_install;
+ 	}
+ 
+ 	/* Create device path for image */
+-	path = efi_image_path ( image, snpdev->path );
++	path = efi_image_path ( image, netpath );
+ 	if ( ! path ) {
+ 		DBGC ( image, "EFIIMAGE %p could not create device path\n",
+ 		       image );
+@@ -214,7 +235,9 @@ static int efi_image_exec ( struct image *image ) {
+ 
+ 	/* Sanity checks */
+ 	assert ( loaded.image->ParentHandle == efi_image_handle );
+-	assert ( loaded.image->DeviceHandle == snpdev->handle );
++	//loaded.image->ParentHandle = efi_loaded_image;
++	loaded.image->DeviceHandle = nethandle;
++	//assert ( loaded.image->DeviceHandle == nethandle );
+ 	assert ( loaded.image->LoadOptionsSize == 0 );
+ 	assert ( loaded.image->LoadOptions == NULL );
+ 
+@@ -264,9 +287,9 @@ static int efi_image_exec ( struct image *image ) {
+  err_cmdline:
+ 	free ( path );
+  err_image_path:
+-	efi_download_uninstall ( snpdev->handle );
++	efi_download_uninstall ( nethandle );
+  err_download_install:
+-	efi_file_uninstall ( snpdev->handle );
++	efi_file_uninstall ( nethandle );
+  err_file_install:
+  err_no_snpdev:
+ 	return rc;
+diff --git a/src/include/ipxe/dhcpv6.h b/src/include/ipxe/dhcpv6.h
+index 2636b8a..b24fdd0 100644
+--- a/src/include/ipxe/dhcpv6.h
++++ b/src/include/ipxe/dhcpv6.h
+@@ -11,7 +11,6 @@ FILE_LICENCE ( GPL2_OR_LATER );
+ 
+ #include <stdint.h>
+ #include <ipxe/in.h>
+-#include <ipxe/uuid.h>
+ 
+ /** DHCPv6 server port */
+ #define DHCPV6_SERVER_PORT 547
+@@ -32,16 +31,18 @@ struct dhcpv6_option {
+ 	uint8_t data[0];
+ } __attribute__ (( packed ));
+ 
+-/** DHCP unique identifier based on UUID (DUID-UUID) */
+-struct dhcpv6_duid_uuid {
++/** DHCP unique identifier based on link-layer address (DUID-LL) */
++struct dhcpv6_duid_ll {
+ 	/** Type */
+ 	uint16_t type;
+-	/** UUID */
+-	union uuid uuid;
++	/** Hardware type */
++	uint16_t htype;
++	/** Link-layer address */
++	uint8_t ll_addr[0];
+ } __attribute__ (( packed ));
+ 
+-/** DHCP unique identifier based on UUID (DUID-UUID) */
+-#define DHCPV6_DUID_UUID 4
++/** DHCP unique identifier based on link-layer address (DUID-LL) */
++#define DHCPV6_DUID_LL 3
+ 
+ /** DHCPv6 client or server identifier option */
+ struct dhcpv6_duid_option {
+diff --git a/src/net/udp/dhcpv6.c b/src/net/udp/dhcpv6.c
+index f7736d0..c386337 100644
+--- a/src/net/udp/dhcpv6.c
++++ b/src/net/udp/dhcpv6.c
+@@ -458,7 +458,9 @@ struct dhcpv6_session {
+ 	/** Start time (in ticks) */
+ 	unsigned long start;
+ 	/** Client DUID */
+-	struct dhcpv6_duid_uuid client_duid;
++	void *client_duid;
++	/** Client DUID length */
++	size_t client_duid_len;
+ 	/** Server DUID, if known */
+ 	void *server_duid;
+ 	/** Server DUID length */
+@@ -577,8 +579,7 @@ static int dhcpv6_tx ( struct dhcpv6_session *dhcpv6 ) {
+ 	int rc;
+ 
+ 	/* Calculate lengths */
+-	client_id_len = ( sizeof ( *client_id ) +
+-			  sizeof ( dhcpv6->client_duid ) );
++	client_id_len = ( sizeof ( *client_id ) + dhcpv6->client_duid_len );
+ 	server_id_len = ( dhcpv6->server_duid ? ( sizeof ( *server_id ) +
+ 						  dhcpv6->server_duid_len ) :0);
+ 	if ( dhcpv6->state->flags & DHCPV6_TX_IA_NA ) {
+@@ -614,8 +615,8 @@ static int dhcpv6_tx ( struct dhcpv6_session *dhcpv6 ) {
+ 	client_id->header.code = htons ( DHCPV6_CLIENT_ID );
+ 	client_id->header.len = htons ( client_id_len -
+ 					sizeof ( client_id->header ) );
+-	memcpy ( client_id->duid, &dhcpv6->client_duid,
+-		 sizeof ( dhcpv6->client_duid ) );
++	memcpy ( client_id->duid, dhcpv6->client_duid,
++		 dhcpv6->client_duid_len );
+ 
+ 	/* Construct server identifier, if applicable */
+ 	if ( server_id_len ) {
+@@ -748,8 +749,8 @@ static int dhcpv6_rx ( struct dhcpv6_session *dhcpv6,
+ 
+ 	/* Verify client identifier */
+ 	if ( ( rc = dhcpv6_check_duid ( &options, DHCPV6_CLIENT_ID,
+-					&dhcpv6->client_duid,
+-					sizeof ( dhcpv6->client_duid ) ) ) !=0){
++					dhcpv6->client_duid,
++					dhcpv6->client_duid_len ) ) != 0 ) {
+ 		DBGC ( dhcpv6, "DHCPv6 %s received %s without correct client "
+ 		       "ID: %s\n", dhcpv6->netdev->name,
+ 		       dhcpv6_type_name ( dhcphdr->type ), strerror ( rc ) );
+@@ -904,12 +905,14 @@ int start_dhcpv6 ( struct interface *job, struct net_device *netdev,
+ 			struct sockaddr sa;
+ 		} server;
+ 	} addresses;
++	struct dhcpv6_duid_ll *client_duid;
++	size_t client_duid_len;
+ 	uint32_t xid;
+-	int len;
+ 	int rc;
+ 
+ 	/* Allocate and initialise structure */
+-	dhcpv6 = zalloc ( sizeof ( *dhcpv6 ) );
++	client_duid_len = ( sizeof ( *client_duid ) + ll_protocol->ll_addr_len);
++	dhcpv6 = zalloc ( sizeof ( *dhcpv6 ) + client_duid_len );
+ 	if ( ! dhcpv6 )
+ 		return -ENOMEM;
+ 	ref_init ( &dhcpv6->refcnt, dhcpv6_free );
+@@ -919,6 +922,8 @@ int start_dhcpv6 ( struct interface *job, struct net_device *netdev,
+ 	xid = random();
+ 	memcpy ( dhcpv6->xid, &xid, sizeof ( dhcpv6->xid ) );
+ 	dhcpv6->start = currticks();
++	dhcpv6->client_duid = ( ( ( void * ) dhcpv6 ) + sizeof ( *dhcpv6 ) );
++	dhcpv6->client_duid_len = client_duid_len;
+ 	timer_init ( &dhcpv6->timer, dhcpv6_timer_expired, &dhcpv6->refcnt );
+ 
+ 	/* Construct client and server addresses */
+@@ -930,17 +935,12 @@ int start_dhcpv6 ( struct interface *job, struct net_device *netdev,
+ 	addresses.server.sin6.sin6_scope_id = netdev->index;
+ 	addresses.server.sin6.sin6_port = htons ( DHCPV6_SERVER_PORT );
+ 
+-	/* Construct client DUID from system UUID */
+-	dhcpv6->client_duid.type = htons ( DHCPV6_DUID_UUID );
+-	if ( ( len = fetch_uuid_setting ( NULL, &uuid_setting,
+-					  &dhcpv6->client_duid.uuid ) ) < 0 ) {
+-		rc = len;
+-		DBGC ( dhcpv6, "DHCPv6 %s could not create DUID-UUID: %s\n",
+-		       dhcpv6->netdev->name, strerror ( rc ) );
+-		goto err_client_duid;
+-	}
+-
+-	/* Construct IAID from link-layer address */
++	/* Construct client DUID and IAID from link-layer address */
++	client_duid = dhcpv6->client_duid;
++	client_duid->type = htons ( DHCPV6_DUID_LL );
++	client_duid->htype = ll_protocol->ll_proto;
++	memcpy ( client_duid->ll_addr, netdev->ll_addr,
++		 ll_protocol->ll_addr_len );
+ 	dhcpv6->iaid = crc32_le ( 0, netdev->ll_addr, ll_protocol->ll_addr_len);
+ 	DBGC ( dhcpv6, "DHCPv6 %s has XID %02x%02x%02x\n", dhcpv6->netdev->name,
+ 	       dhcpv6->xid[0], dhcpv6->xid[1], dhcpv6->xid[2] );
+@@ -965,7 +965,6 @@ int start_dhcpv6 ( struct interface *job, struct net_device *netdev,
+ 
+  err_open_socket:
+ 	dhcpv6_finished ( dhcpv6, rc );
+- err_client_duid:
+ 	ref_put ( &dhcpv6->refcnt );
+ 	return rc;
+ }
+diff --git a/src/setuserclass.ipxe b/src/setuserclass.ipxe
+new file mode 100644
+index 0000000..779f2f7
+--- /dev/null
++++ b/src/setuserclass.ipxe
+@@ -0,0 +1,6 @@
++#!ipxe
++echo INFO: successfully tftp fetched FB ipxe rom.
++echo INFO: setting dhcp user-class to 'FBipxe'.
++echo EXECUTING: set user-class FBipxe
++set user-class FBipxe
++isset ${filename} && echo Clearing old DHCP filename ${filename}
++isset ${filename} && clear net0.dhcp/filename
++autoboot || autoboot
++autoboot || autoboot
++# Fallbacks
++echo INFO: Configuring net0 using IPv6
++ifconf --configurator dhcpv6 net0
++isset ${filename} && goto done
++echo INFO: Configuring net0 using DHCP
++ifconf --configurator dhcp net0
++isset ${filename} && goto done
++echo Could not boot. Trying again in 10s
++sleep 10
++goto retry
++:done
++ifstat net0
++echo INFO: Booting using ${filename}
++chain ${filename}

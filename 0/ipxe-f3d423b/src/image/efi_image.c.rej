@@ -1,0 +1,27 @@
+--- a/src/image/efi_image.c
++++ b/src/image/efi_image.c
+@@ -174,21 +195,21 @@ static int efi_image_exec ( struct image *image ) {
+ 	}
+ 
+ 	/* Install file I/O protocols */
+-	if ( ( rc = efi_file_install ( snpdev->handle ) ) != 0 ) {
++	if ( ( rc = efi_file_install ( nethandle ) ) != 0 ) {
+ 		DBGC ( image, "EFIIMAGE %p could not install file protocol: "
+ 		       "%s\n", image, strerror ( rc ) );
+ 		goto err_file_install;
+ 	}
+ 
+ 	/* Install iPXE download protocol */
+-	if ( ( rc = efi_download_install ( snpdev->handle ) ) != 0 ) {
++	if ( ( rc = efi_download_install ( nethandle ) ) != 0 ) {
+ 		DBGC ( image, "EFIIMAGE %p could not install iPXE download "
+ 		       "protocol: %s\n", image, strerror ( rc ) );
+ 		goto err_download_install;
+ 	}
+ 
+ 	/* Create device path for image */
+-	path = efi_image_path ( image, snpdev->path );
++	path = efi_image_path ( image, netpath );
+ 	if ( ! path ) {
+ 		DBGC ( image, "EFIIMAGE %p could not create device path\n",
+ 		       image );
